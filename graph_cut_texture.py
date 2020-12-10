@@ -6,11 +6,14 @@ from typing import Tuple
 import maxflow
 from random import random, randint
 import scipy.ndimage as nd
+import os
 
 plt.figure(num=None, figsize=(40, 32), dpi=80, facecolor='w', edgecolor='k')
 
 minCap = 1e-7
 infiniteCap = 1e12
+
+out_dir = ''  # assigned in main
 
 
 def rgb2gray(rgb):
@@ -69,6 +72,9 @@ class GraphCutTexture():
         self.seamNode: [SeamNode] = []
 
         self.inputImageGY, self.inputImageGX = self.computeGradientImage(self.input_img)
+        self.borderSize = 16
+
+        self.maxErrNodeNbGlobal = -1
 
     def revealSeams(self):
         seamSize = 1
@@ -85,7 +91,7 @@ class GraphCutTexture():
                                 if (ti >= 0 and ti < self.output_width) and (tj >= 0 and tj < self.output_height):
                                     self.output_img[tj, ti] = [255, 0, 0]
 
-    def insertPatch(self, y: int, x: int, filling=True):
+    def insertPatch(self, y: int, x: int, filling=True, blending=False, radius=0, inputY=0, inputX=0, tY=0, tX=0):
         # y: new patch offset in global space, can be < 0
         sx = self.input_width
         sy = self.input_height
@@ -137,7 +143,7 @@ class GraphCutTexture():
                         theNode.color = self.croppedInputImage[j, i]
                         theNode.empty = False
             return 0
-        elif (noOverlap == 0):
+        elif (noOverlap == 0 and filling):
             print('Patch does not contribute in filling')
             return -1
 
@@ -365,7 +371,30 @@ class GraphCutTexture():
 
         else:
             # Refinement
-            print('NOT IMPLEMENTED: Refinement')
+            print('Refinement')
+            outputX = inputX + tX
+            outputY = inputY + tY
+            v1X = max(0, outputX)
+            v1Y = max(0, outputY)
+            v2X = min(self.output_width - 1, outputX + radius - 1)
+            v2Y = min(self.output_height - 1, outputY + radius - 1)
+            # Subpatch origin coordinates in output space
+            outputX = v1X
+            outputY = v1Y
+            # Subpatch origin coordinates in input space
+            inputX = outputX - tX
+            inputY = outputY - tY
+
+            cj = 0
+            ci = 0
+            for j in range(v1Y, v2Y + 1):
+                for i in range(v1X, v2X + 1):
+                    if (inputX + ci > 0) and (inputY + cj > 0):
+                        nodeNbLocal = self.getNodeNbLocal(inputX + ci, inputY + cj)
+                        g.add_tedge(nodeNbLocal, 0.0, infiniteCap)
+                        nbSink += 1
+                    ci += 1
+                cj += 1
 
         assert (nbSink)
         flow = g.maxflow()
@@ -459,8 +488,6 @@ class GraphCutTexture():
                     if j < self.croppedInput_h - 1:
                         if g.get_segment(nodeNbLocal) != g.get_segment(self.getNodeNbLocal(i, j + 1)):
                             self.globalNode[nodeNbGlobal].seamBottom = True
-
-        blending = False
 
         if blending:
             pass
@@ -610,6 +637,78 @@ class GraphCutTexture():
         dst[dst_offset_y:dst_offset_y + src_height, dst_offset_x:dst_offset_x + src_width] = \
             src[src_offset_y:src_offset_y + src_height, src_offset_x:src_offset_x + src_width]
 
+    def randomRefinement(self, iter=20):
+        overlap_width = self.input_width // 3
+        overlap_height = self.input_height // 3
+        blending = False
+        for k in range(iter):
+            x = -(2 * overlap_width) + randint(0, self.output_width + overlap_width - 1)
+            y = -(2 * overlap_height) + randint(0, self.output_height + overlap_height - 1)
+            self.insertPatch(y, x, False, blending, radius=0, inputY=0, inputX=0, tY=y, tX=x)
+            self.updateSeamsMaxError()
+            self.patch_number += 1
+            self.writeImage()
+            self.revealSeams()
+            self.save_output_img(self.patch_number)
+
+    def seamsErrorSubPatchRefinement(self, maxIter, radius, blending):
+
+        inputRadius = radius
+
+        maxErrX = 0
+        maxErrY = 0
+
+        x = 0
+        y = 0
+
+        err = 0.
+
+        minErr = 0.
+
+        minErrI = 0
+        minErrJ = 0
+
+        self.updateSeamsMaxError()
+
+        for k in range(maxIter):
+            if self.maxErrNodeNbGlobal != -1:
+                radius = (inputRadius - 2) + (randint(0, 4))
+                minErr = 1e15
+
+                minErrI = -1
+                minErrJ = -1
+
+                maxErrX = self.maxErrNodeNbGlobal % self.output_width
+                maxErrY = self.maxErrNodeNbGlobal // self.output_height
+
+                # Fixed region position
+                x = maxErrX - (radius // 2)
+                y = maxErrY - (radius // 2)
+
+                # Cropped fixed region
+
+                v1X = max(0, x)
+
+                v1Y = max(0, y)
+
+                v2X = min(self.output_width - 1, x + radius - 1)
+
+                v2Y = min(self.output_height - 1, y + radius - 1)
+                cropped_w = v2X - v1X + 1
+                cropped_h = v2Y - v1Y + 1
+
+                for j in range(self.input_width - 3 * radius):
+                    for i in self.input_height - 3 * radius:
+                        err = self.computeLocalSSD(v1X - radius, v1Y - radius, i, j, 2 * radius + cropped_w,
+                                                   2 * radius + cropped_h)
+                        if (err < minErr):
+                            minErr = err
+                            minErrI = i
+                            minErrJ = j
+
+                minErrI += radius
+                minErrJ += radius
+
     def random_fill(self):
         print('Initial synthesis: Random')
         overlap_width = self.input_width // 3
@@ -628,9 +727,9 @@ class GraphCutTexture():
                     res = self.insertPatch(y, x)
                     if res != -10:
                         self.patch_number += 1
-                        self.writeImage()
-                        self.revealSeams()
-                        self.save_output_img(self.patch_number)
+                        # self.writeImage()
+                        # self.revealSeams()
+                        # self.save_output_img(self.patch_number)
                         # self.show_output_img()
 
                 x = x + (overlap_width + randint(0, overlap_width - 1))
@@ -666,10 +765,32 @@ class GraphCutTexture():
         pass
 
     def save_output_img(self, patch_id):
-        name = 'tmp/out_{}.png'.format(patch_id)
+        name = os.path.join(out_dir, 'out_{}.png'.format(patch_id))
         plt.figure(num=None, figsize=(20, 16), dpi=80, facecolor='w', edgecolor='k')
         plt.imshow(self.output_img)
         plt.savefig(name)
+
+    def updateSeamsMaxError(self):
+        nodeNbGlobal = 0
+        self.maxErrNodeNbGlobal = -1
+        maxErr = -1.0
+        bs = self.borderSize
+        for j in range(bs, self.output_height - bs):
+            for i in range(bs, self.output_width - bs):
+                nodeNbGlobal = self.getNodeNbGlobal(0, 0, i, j)
+                theNode = self.globalNode[nodeNbGlobal]
+                if not theNode.empty:
+                    if theNode.seamRight:
+                        if theNode.rightCost > maxErr:
+                            maxErr = theNode.rightCost
+                            self.maxErrNodeNbGlobal = nodeNbGlobal
+
+                    if theNode.seamBottom:
+                        if theNode.bottomCost > maxErr:
+                            maxErr = theNode.bottomCost
+                            self.maxErrNodeNbGlobal = nodeNbGlobal
+
+        return maxErr
 
 
 if __name__ == "__main__":
@@ -684,9 +805,16 @@ if __name__ == "__main__":
 
     print('original image size: ', img_in.shape)
 
+    out_dir = 'out/graph_cut_texture'
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
     gc_texture = GraphCutTexture(img_in, img_in.shape[0] * 2, img_in.shape[1] * 2)
 
     gc_texture.random_fill()
+
+    gc_texture.borderSize = 8
+    gc_texture.randomRefinement(iter=20)
 
     gc_texture.writeImage()
     # gc_texture.revealSeams()
