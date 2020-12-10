@@ -1,11 +1,13 @@
 from imageio import imread
 import numpy as np
-import scipy
 from matplotlib import pyplot as plt
 from typing import Tuple
 import maxflow
 from random import random, randint
-import scipy.ndimage as nd
+import os
+
+if not os.path.exists('out/graph_cut_simple'):
+    os.makedirs('out/graph_cut_simple')
 
 
 class GraphCutTexture():
@@ -32,8 +34,10 @@ class GraphCutTexture():
         new_x = x if x >= 0 else 0
         new_height = self.input_height
         new_width = self.input_width
-        if y < 0: new_height += y
-        if x < 0: new_width += x
+        if y < 0:
+            new_height += y
+        if x < 0:
+            new_width += x
         if new_y + new_height >= self.output_height:
             new_height -= new_y + new_height - self.output_height + 1
         if new_x + new_width >= self.output_width:
@@ -51,7 +55,7 @@ class GraphCutTexture():
         if not overlap_mask.any():
             self.copy_to_offset(self.output_img, self.input_img, (y, x))
             self.output_img_filled_mask |= input_img_mask_expanded
-            self.patch_number+=1
+            self.patch_number += 1
         else:
             # do a graph cut insertion
 
@@ -117,7 +121,6 @@ class GraphCutTexture():
             assert old_mask_cropped.shape[0] == new_height
             assert old_mask_cropped.shape[1] == new_width
 
-
             self.set_img(old_mask_cropped, 5, 'old_mask_cropped')
 
             nodeids_connected_to_old, nodeids_connected_to_new = self.get_nodeids_connected_to_old_and_new(nodeids,
@@ -144,21 +147,13 @@ class GraphCutTexture():
             self.copy_to_offset(self.output_img, new_patch_cropped, (new_y, new_x))
             self.copy_to_offset(self.output_img, overlap_buffer, (new_y, new_x))
 
-            self.output_img_filled_mask|=input_img_mask_expanded
+            self.output_img_filled_mask |= input_img_mask_expanded
 
             # self.show_output_img()
-            self.patch_number+=1
-
+            self.patch_number += 1
 
     def get_nodeids_connected_to_old_and_new(self, nodeids, old_mask):
-        # neighbour_kernel = np.array([[0, 1, 0],
-        #                              [1, 0, 1],
-        #                              [0, 1, 0]])  # up, down, left, right
-        # neighbour_average = nd.convolve(old_mask, neighbour_kernel, mode='constant')
-        # on_edge = (neighbour_average != old_mask)
-
         connected_to_new_mask = (old_mask == 0)
-
 
         connected_to_old_mask = np.ones_like(old_mask)
         connected_to_old_mask[1:-1, 1:-1] = 0
@@ -168,14 +163,13 @@ class GraphCutTexture():
         assert (connected_to_old_mask * connected_to_new_mask).sum() == 0
 
         if not connected_to_new_mask.any():
-            yy = connected_to_new_mask.shape[0]//2
-            xx = connected_to_new_mask.shape[1]//2
-            connected_to_new_mask[yy,xx] = True
-            connected_to_old_mask[yy,xx] = False
+            yy = connected_to_new_mask.shape[0] // 2
+            xx = connected_to_new_mask.shape[1] // 2
+            connected_to_new_mask[yy, xx] = True
+            connected_to_old_mask[yy, xx] = False
 
         connected_to_new = nodeids[connected_to_new_mask]
         connected_to_old = nodeids[connected_to_old_mask > 0]
-
 
         assert (connected_to_new_mask.any())
         assert (connected_to_old_mask.any())
@@ -186,13 +180,13 @@ class GraphCutTexture():
         difference_between_patch = np.abs(overlap_new - overlap_old)
         shift_left_dif = np.roll(difference_between_patch, (0, -1))
         match_cost_right = (difference_between_patch + shift_left_dif).sum(axis=2)
-        return match_cost_right
+        return match_cost_right + 1
 
     def construct_cost_matrix_down(self, overlap_new: np.array, overlap_old: np.array):
         difference_between_patch = np.abs(overlap_new - overlap_old)
         shift_up_dif = np.roll(difference_between_patch, (-1, 0))
         match_cost_down = (difference_between_patch + shift_up_dif).sum(axis=2)
-        return match_cost_down
+        return match_cost_down + 1
 
     def get_cropped(self, src: np.ndarray, offset: Tuple[int, int], shape: Tuple[int, int]):
         offset_y, offset_x = offset
@@ -256,6 +250,8 @@ class GraphCutTexture():
                 x = x + (overlap_width + randint(0, overlap_width - 1))
                 y = offset_y - (overlap_height + randint(0, overlap_height - 1))
 
+                # gc_texture.save_fig(self.patch_number)
+
                 if x >= self.output_width:
                     break
 
@@ -276,12 +272,17 @@ class GraphCutTexture():
         # plt.imshow(img)
         pass
 
+    def save_fig(self, index):
+        name = 'out/graph_cut_simple/out_{}.png'.format(index)
+        plt.figure(num=None, figsize=(20, 16), dpi=80, facecolor='w', edgecolor='k')
+        plt.imshow(self.output_img)
+        plt.savefig(name)
 
 
 if __name__ == "__main__":
-    # img_in = imread('data/strawberries2.gif')
+    img_in = imread('data/strawberries2.gif')
     # img_in = imread('data/green.gif')
-    img_in = imread('data/akeyboard_small.gif')
+    # img_in = imread('data/akeyboard_small.gif')
     if img_in.shape[2] == 4:
         # remove alpha channel
         img_in = np.array(img_in[:, :, 0:3])
