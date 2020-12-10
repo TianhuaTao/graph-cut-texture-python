@@ -70,6 +70,21 @@ class GraphCutTexture():
 
         self.inputImageGY, self.inputImageGX = self.computeGradientImage(self.input_img)
 
+    def revealSeams(self):
+        seamSize = 1
+        for j in range(self.output_height):
+            for i in range(self.output_width):
+                nodeNbGlobal = self.getNodeNbGlobal(0, 0, i, j)
+                theNode = self.globalNode[nodeNbGlobal]
+                if not theNode.empty:
+                    if theNode.seamRight or theNode.seamBottom:
+                        for sj in range(-seamSize, seamSize):
+                            for si in range(-seamSize, seamSize):
+                                tj = j + sj
+                                ti = i + si
+                                if (ti >= 0 and ti < self.output_width) and (tj >= 0 and tj < self.output_height):
+                                    self.output_img[tj, ti] = [255, 0, 0]
+
     def insertPatch(self, y: int, x: int, filling=True):
         # y: new patch offset in global space, can be < 0
         sx = self.input_width
@@ -614,6 +629,7 @@ class GraphCutTexture():
                     if res != -10:
                         self.patch_number += 1
                         self.writeImage()
+                        self.revealSeams()
                         self.save_output_img(self.patch_number)
                         # self.show_output_img()
 
@@ -650,16 +666,16 @@ class GraphCutTexture():
         pass
 
     def save_output_img(self, patch_id):
-        name = 'out_{}.png'.format(patch_id)
+        name = 'tmp/out_{}.png'.format(patch_id)
         plt.figure(num=None, figsize=(20, 16), dpi=80, facecolor='w', edgecolor='k')
         plt.imshow(self.output_img)
         plt.savefig(name)
 
 
 if __name__ == "__main__":
-    # img_in = imread('data/strawberries2.gif')
+    img_in = imread('data/strawberries2.gif')
     # img_in = imread('data/green.gif')
-    img_in = imread('data/akeyboard_small.gif')
+    # img_in = imread('data/akeyboard_small.gif')
     if img_in.shape[2] == 4:
         # remove alpha channel
         img_in = np.array(img_in[:, :, 0:3])
@@ -673,5 +689,6 @@ if __name__ == "__main__":
     gc_texture.random_fill()
 
     gc_texture.writeImage()
+    # gc_texture.revealSeams()
     gc_texture.save_output_img('final')
     gc_texture.show_output_img()
