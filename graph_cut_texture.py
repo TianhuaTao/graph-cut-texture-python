@@ -3,9 +3,12 @@ import numpy as np
 from matplotlib import pyplot as plt
 
 import maxflow
+import random
 from random import randint
 import scipy.ndimage as nd
 import os
+
+random.seed(0)
 
 plt.figure(num=None, figsize=(40, 32), dpi=80, facecolor='w', edgecolor='k')
 
@@ -101,21 +104,29 @@ class GraphCutTexture:
 
         self.maxErrNodeNbGlobal = -1
         self.num_sink = 0
+        self.sig = (self.input_img.sum(axis=2) / 3.0 / 255.0).std()
+        self.sig2 = self.sig * self.sig
 
-    def reveal_seams(self):
-        seam_size = 1
-        for j in range(self.output_height):
-            for i in range(self.output_width):
-                node_nb_global = self.get_node_number_global(0, 0, i, j)
-                the_node = self.globalNode[node_nb_global]
-                if not the_node.empty:
-                    if the_node.seamRight or the_node.seamBottom:
-                        for sj in range(-seam_size, seam_size):
-                            for si in range(-seam_size, seam_size):
-                                tj = j + sj
-                                ti = i + si
-                                if (0 <= ti < self.output_width) and (0 <= tj < self.output_height):
-                                    self.output_img[tj, ti] = [255, 0, 0]
+        self.cropped_left_top_input_space = None
+        self.cropped_right_bottom_input_space = None
+        self.cropped_left_top_output_space = None
+        self.cropped_right_bottom_output_space = None
+
+    def pick_error_region(self, radius):
+        if self.maxErrNodeNbGlobal == -1:
+            print('Error: no error region')
+            return
+        max_err_y, max_err_x = self.get_position_global(self.maxErrNodeNbGlobal)
+        v1_y = max_err_y - radius
+        v1_x = max_err_x - radius
+        v2_y = max_err_y + radius
+        v2_x = max_err_x + radius
+        v1_y = max(v1_y, 0)
+        v1_x = max(v1_x, 0)
+        v2_y = min(v2_y, self.output_height)
+        v2_x = min(v2_x, self.output_width)
+
+        return v1_y, v1_x, v2_y, v2_x
 
     def count_non_overlap(self, x, y):
         no_overlap = 0
@@ -208,7 +219,7 @@ class GraphCutTexture:
                         g.add_edge(node_nb_local, node_nb_local_right, 0.0, 0.0)
                         self.globalNode[node_nb_global].rightCost = 0.0
 
-                if (j < self.croppedInput_h - 1):
+                if j < self.croppedInput_h - 1:
                     nodeNbGlobalBottom = self.get_node_number_global(x, y, i, j + 1)
                     nodeNbLocalBottom = self.get_node_number_local(i, j + 1)
 
@@ -269,7 +280,8 @@ class GraphCutTexture:
 
         return overlap
 
-    def insert_patch(self, y: int, x: int, filling=True, blending=False, radius=0, inputY=0, inputX=0, tY=0, tX=0,
+    def insert_patch(self, y: int, x: int, filling=True, blending=False, radius=0, err_p1_y=0, err_p1_x=0, err_p2_y=0,
+                     err_p2_x=0,
                      random_refine=False):
         # y: new patch offset in global space, can be < 0
 
@@ -278,10 +290,14 @@ class GraphCutTexture:
         # v1: left top point in input image space
         v1_x: int = max(0, x) - x
         v1_y: int = max(0, y) - y
+        self.cropped_left_top_input_space = (v1_y, v1_x)
 
         # v2: right bottom point in input image space
         v2_x: int = min(self.output_width - 1, x + self.input_width - 1) - x
         v2_y: int = min(self.output_height - 1, y + self.input_height - 1) - y
+        self.cropped_right_bottom_input_space = (v2_y, v2_x)
+        self.cropped_left_top_output_space = (y + v1_y, x + v1_x)
+        self.cropped_right_bottom_output_space = (y + v2_y, x + v1_x)
 
         self.croppedInput_w = v2_x - v1_x + 1
         self.croppedInput_h = v2_y - v1_y + 1
@@ -344,10 +360,7 @@ class GraphCutTexture:
         self.link_sink_node(y, x, g, filling,
                             random_refine=random_refine,
                             radius=radius,
-                            inputX=inputX,
-                            inputY=inputY,
-                            tX=tX,
-                            tY=tY)
+                            err_p1_y=err_p1_y, err_p1_x=err_p1_x, err_p2_y=err_p2_y, err_p2_x=err_p2_x)
 
         flow = g.maxflow()
 
@@ -355,7 +368,6 @@ class GraphCutTexture:
 
         self.merge_pixels(y, x, g, imageGY, imageGX, blending)
 
-        g = None
         self.seamNode = []
 
         return overlap
@@ -506,7 +518,7 @@ class GraphCutTexture:
             if not self.globalNode[node_nb_global].empty:
                 g.add_tedge(self.get_node_number_local(i, j), infiniteCap, 0.0)
 
-    def link_sink_node(self, y, x, g, filling, random_refine, radius, inputX, inputY, tX, tY):
+    def link_sink_node(self, y, x, g, filling, random_refine, radius, err_p1_y, err_p1_x, err_p2_y, err_p2_x):
         if filling:
             print('Filling patch ', self.patch_number)
             for j in range(self.croppedInput_h):
@@ -539,29 +551,32 @@ class GraphCutTexture:
             # Refinement
             print('Refinement patch ', self.patch_number)
             if not random_refine:
-                outputX = inputX + tX
-                outputY = inputY + tY
-                v1_x = max(0, outputX)
-                v1_y = max(0, outputY)
-                v2_x = min(self.output_width - 1, outputX + radius - 1)
-                v2_y = min(self.output_height - 1, outputY + radius - 1)
-                # Subpatch origin coordinates in output space
-                outputX = v1_x
-                outputY = v1_y
-                # Subpatch origin coordinates in input space
-                inputX = outputX - tX
-                inputY = outputY - tY
+                # outputX = inputX + tX
+                # outputY = inputY + tY
+                # v1_x = max(0, outputX)
+                # v1_y = max(0, outputY)
+                # v2_x = min(self.output_width - 1, outputX + radius - 1)
+                # v2_y = min(self.output_height - 1, outputY + radius - 1)
+                # # Subpatch origin coordinates in output space
+                # outputX = v1_x
+                # outputY = v1_y
+                # # Subpatch origin coordinates in input space
+                # inputX = outputX - tX
+                # inputY = outputY - tY
+                #
+                # cj = 0
+                # ci = 0
+                err_node = 0
+                for j in range(err_p1_y, err_p2_y + 1):
+                    for i in range(err_p1_x, err_p2_x + 1):
+                        j_local = j - self.cropped_left_top_output_space[0]
+                        i_local = i - self.cropped_left_top_output_space[1]
 
-                cj = 0
-                ci = 0
-                for j in range(v1_y, v2_y + 1):
-                    for i in range(v1_x, v2_x + 1):
-                        if (inputX + ci > 0) and (inputY + cj > 0):
-                            node_nb_local = self.get_node_number_local(inputX + ci, inputY + cj)
-                            g.add_tedge(node_nb_local, 0.0, infiniteCap)
-                            self.num_sink += 1
-                        ci += 1
-                    cj += 1
+                        node_nb_local = self.get_node_number_local(i_local, j_local)
+                        g.add_tedge(node_nb_local, 0.0, infiniteCap)
+                        self.num_sink += 1
+                        err_node += 1
+                # print('error node', err_node)
             else:
                 # random refinement
                 if self.num_sink == 0:
@@ -575,8 +590,9 @@ class GraphCutTexture:
                     g.add_tedge(node_nb_local, 0.0, infiniteCap)
                     self.num_sink += 1
                 else:
-                    print('already connected')
-
+                    pass
+                    # print('already connected')
+            # print('sink number', self.num_sink)
         assert self.num_sink > 0
 
     # -------------------------------- START: helper function --------------------------------
@@ -590,121 +606,231 @@ class GraphCutTexture:
         else:
             return -1
 
-    def add_img_border(self, img, border_y, border_x):
+    def get_position_global(self, node_nb_global):
+        x = node_nb_global % self.output_width
+        y = node_nb_global // self.output_width
+        return y, x
+
+    def add_img_border(self, img, border_top, border_bottom, border_left, border_right):
         img_h = img.shape[0]
         img_w = img.shape[1]
-        img_bordered = np.zeros((img_h + 2 * border_y, img_w + 2 * border_x, 3), dtype=int)
-        img_bordered[border_y: border_y + img_h, border_x: border_x + img_w] = img
+        img_bordered = np.zeros((img_h + border_top + border_bottom, img_w + border_left + border_right, 3),
+                                dtype=int)
+        img_bordered[border_top: border_top + img_h, border_left: border_left + img_w] = img
         return img_bordered
 
-    def add_mask_border(self, mask, border_y, border_x):
+    def add_mask_border(self, mask, border_top, border_bottom, border_left, border_right):
         mask_h = mask.shape[0]
         mask_w = mask.shape[1]
-        mask_bordered = np.zeros((mask_h + 2 * border_y, mask_w + 2 * border_x), dtype=int)
-        mask_bordered[border_y: border_y + mask_h, border_x: border_x + mask_w] = mask
+        mask_bordered = np.zeros((mask_h + border_top + border_bottom, mask_w + border_left + border_right,),
+                                 dtype=int)
+        mask_bordered[border_top: border_top + mask_h, border_left: border_left + mask_w] = mask
         return mask_bordered
 
     # -------------------------------- END: helper function --------------------------------
 
-    def seamsErrorSubPatchRefinement(self, maxIter, radius, blending):
-
-        inputRadius = radius
-        maxErrX = 0
-        maxErrY = 0
-        x = 0
-        y = 0
-        err = 0.
-        minErr = 0.
-        minErrI = 0
-        minErrJ = 0
-
-        self.update_seams_max_error()
-
-        for k in range(maxIter):
-            if self.maxErrNodeNbGlobal != -1:
-                radius = (inputRadius - 2) + (randint(0, 4))
-                minErr = 1e15
-
-                minErrI = -1
-                minErrJ = -1
-
-                maxErrX = self.maxErrNodeNbGlobal % self.output_width
-                maxErrY = self.maxErrNodeNbGlobal // self.output_height
-
-                # Fixed region position
-                x = maxErrX - (radius // 2)
-                y = maxErrY - (radius // 2)
-
-                # Cropped fixed region
-                v1X = max(0, x)
-                v1Y = max(0, y)
-                v2X = min(self.output_width - 1, x + radius - 1)
-                v2Y = min(self.output_height - 1, y + radius - 1)
-                cropped_w = v2X - v1X + 1
-                cropped_h = v2Y - v1Y + 1
-
-                for j in range(self.input_width - 3 * radius):
-                    for i in self.input_height - 3 * radius:
-                        err = self.computeLocalSSD(v1X - radius, v1Y - radius, i, j, 2 * radius + cropped_w,
-                                                   2 * radius + cropped_h)
-                        if (err < minErr):
-                            minErr = err
-                            minErrI = i
-                            minErrJ = j
-
-                minErrI += radius
-                minErrJ += radius
-
     # -------------------------------- START: entire patch matching placement algorithm --------------------------------
     def entire_matching_filling(self, k, blending=False, save_img=False, show_seams=False):
         print('Initial synthesis: Entire Patch matching')
-        overlap_width = self.input_width // 3
-        overlap_height = self.input_height // 3
+        window_width = self.input_width // 4
+        window_height = self.input_height // 4
 
         offset_y = 0
 
-        # y is sample in (offset_y-overlap_height, offset_y]
-        y = offset_y - (overlap_height + randint(0, overlap_height - 1))
+        used_cost = np.zeros((self.output_height, self.output_width), dtype=bool)
+        # # y is sample in (offset_y-overlap_height, offset_y]
+        # y = offset_y - (window_height + randint(0, window_height - 1))
 
-        while True:  # loop y
+        # y = randint(offset_y - self.input_height + window_height, offset_y - 1)
+        while offset_y < self.output_height:  # loop y
             print('New Row')
             offset_x = 0
-            # sample x in [-overlap_width, 0)
-            x = offset_x - (overlap_width + randint(0, overlap_width - 1))
-            while True:  # loop x
-                if y < self.output_height:
+            # # sample x in [-overlap_width, 0)
+            # x = offset_x - (window_width + randint(0, window_width - 1))
+            # x = randint(offset_x - self.input_width + window_width, offset_x - 1)
+            while offset_x < self.output_width:  # loop x
+                self.write_image()
+
+                window_filled_mask = self.output_img_filled_mask[offset_y:offset_y + window_height,
+                                     offset_x:offset_x + window_width]
+                if window_filled_mask.all():
+                    # this window is filled, skip
+                    offset_x += window_width
+                    continue
+                # calculate cost matrix
+                cost_matrix = self.compute_entire_matching_cost_matrix(
+                    y_start=offset_y - self.input_height + window_height,
+                    y_end=offset_y,
+                    x_start=offset_x - self.input_width + window_width,
+                    x_end=offset_x)
+
+                # sample y, x according to the cost matrix
+
+                probs = np.exp(-cost_matrix / self.sig2 / k)
+                if probs.sum() == 0.0:
+                    print('k is too small, all probs is zero')
+                    probs[np.where(cost_matrix == np.min(cost_matrix))] = 1
+                    probs = probs / probs.sum()  # all probabilities should add up to one
+
+                else:
+                    probs = probs / probs.sum()  # all probabilities should add up to one
+                probs = probs.reshape((-1,))
+                index = np.random.choice(probs.shape[0], p=probs)
+                index_x = index % cost_matrix.shape[1]
+                index_y = index // cost_matrix.shape[1]
+                y = index_y + offset_y - self.input_height + window_height
+                x = index_x + offset_x - self.input_width + window_width
+
+                if y < self.output_height and x < self.output_width:
                     res = self.insert_patch(y, x)
                     if res != -1:  # some pixel is added
                         self.patch_number += 1
+                        self.update_seams_max_error()
+
                         if save_img:
                             self.write_image()
                             if show_seams:
                                 self.reveal_seams()
+                                self.reveal_seams_max_error(2)
                             self.save_output_img(self.patch_number)
+                else:
+                    print('Error')
 
-                offset_x += overlap_width  # go to next column
+                offset_x += window_width  # go to next column
 
-                # the x candidate is in [offset_x-overlap_width, offset_x)
-                # the y candidate is in [offset_y-overlap_height, offset_y)
+                # if offset_x > self.output_width:
+                #     break
+                # the x candidate is in [offset_x-input_width+window_width, offset_x)
+                # the y candidate is in [offset_y-input_height+window_height, offset_y)
 
-                # TODO: calculate cost matrix
-                # TODO: sample y, x according to the cost matrix
-                self.compute_entire_matching_cost_matrix()
+                # min_cost = cost_matrix[index_y,index_x]
+                # if x >= self.output_width:
+                #     break
 
-                if x >= self.output_width:
-                    break
+            offset_y += window_height  # go to next row
 
-            offset_y += overlap_height  # go to next row
+            # if offset_y > self.output_height:
+            #     break
+            # # sample y
+            # y = offset_y - (window_height + randint(0, window_height - 1))
 
-            # sample y
-            y = offset_y - (overlap_height + randint(0, overlap_height - 1))
+            # if y >= self.output_height:
+            #     break
 
-            if y >= self.output_height:
-                break
+    def entire_matching_refinement(self, iter=20, k=0.1, error_radius=2, save_img=False, show_seams=False):
+        print('Refinement: Entire Patch matching')
+        padding_height = self.input_height // 3
+        padding_width = self.input_width // 3
+
+        blending = False
+        for j in range(iter):
+            self.write_image()
+            v1y, v1x, v2y, v2x = self.pick_error_region(error_radius)
+            p1y = v2y - self.input_height
+            p1x = v2x - self.input_width
+            p2y = v1y
+            p2x = v1x
+
+            # calculate cost matrix
+            cost_matrix = self.compute_entire_matching_cost_matrix(
+                y_start=p1y,
+                y_end=p2y,
+                x_start=p1x,
+                x_end=p2x)
+
+            # sample y, x according to the cost matrix
+
+            probs = np.exp(-cost_matrix / self.sig2 / k)
+            if probs.sum() == 0.0:
+                print('k is too small, all probs is zero')
+                probs[np.where(cost_matrix == np.min(cost_matrix))] = 1
+                probs = probs / probs.sum()  # all probabilities should add up to one
+
+            else:
+                probs = probs / probs.sum()  # all probabilities should add up to one
+            probs = probs.reshape((-1,))
+            index = np.random.choice(probs.shape[0], p=probs)
+            index_x = index % cost_matrix.shape[1]
+            index_y = index // cost_matrix.shape[1]
+            y = index_y + p1y
+            x = index_x + p1x
+
+            if y < self.output_height and x < self.output_width:
+                res = self.insert_patch(y, x, filling=False, radius=error_radius, random_refine=False,
+                                        err_p1_y=v1y,
+                                        err_p1_x=v1x,
+                                        err_p2_y=v2y,
+                                        err_p2_x=v2x)
+                if res != -1:  # some pixel is added
+                    self.patch_number += 1
+                    self.update_seams_max_error(radius=error_radius)
+
+                    if save_img:
+                        self.write_image()
+                        if show_seams:
+                            self.reveal_seams()
+                            self.reveal_seams_max_error(error_radius)
+                        self.save_output_img(self.patch_number)
+            else:
+                print('Error')
 
     # -------------------------------- END: entire patch matching placement algorithm --------------------------------
 
     # -------------------------------- START: sub patch matching placement algorithm --------------------------------
+    def sub_matching_filling(self, k, blending=False, save_img=False, show_seams=False):
+        return self.entire_matching_filling(k, blending, save_img, show_seams)
+
+    def sub_matching_refinement(self, iter=20, k=0.1, error_radius=2, save_img=False, show_seams=False):
+        print('Refinement: Sub Patch matching')
+        for j in range(iter):
+            self.write_image()
+            v1y, v1x, v2y, v2x = self.pick_error_region(error_radius)
+            # p1y = v2y - self.input_height
+            # p1x = v2x - self.input_width
+            # p2y = v1y
+            # p2x = v1x
+
+            # calculate cost matrix
+            cost_matrix = self.compute_sub_matching_cost_matrix(
+                y_start=v1y,
+                y_end=v2y,
+                x_start=v1x,
+                x_end=v2x)
+
+            probs = np.exp(-cost_matrix / self.sig2 / k)
+            if probs.sum() == 0.0:
+                print('k is too small, all probs is zero')
+                probs[np.where(cost_matrix == np.min(cost_matrix))] = 1
+                probs = probs / probs.sum()  # all probabilities should add up to one
+
+            else:
+                probs = probs / probs.sum()  # all probabilities should add up to one
+            probs = probs.reshape((-1,))
+            index = np.random.choice(probs.shape[0], p=probs)
+            index_x = index % cost_matrix.shape[1]
+            index_y = index // cost_matrix.shape[1]
+
+            y = v1y - index_y
+            x = v1x - index_x
+
+            if y < self.output_height and x < self.output_width:
+                res = self.insert_patch(y, x, filling=False, radius=error_radius, random_refine=False,
+                                        err_p1_y=v1y,
+                                        err_p1_x=v1x,
+                                        err_p2_y=v2y,
+                                        err_p2_x=v2x)
+                if res != -1:  # some pixel is added
+                    self.patch_number += 1
+                    self.update_seams_max_error(radius=error_radius)
+
+                    if save_img:
+                        self.write_image()
+                        if show_seams:
+                            self.reveal_seams()
+                            self.reveal_seams_max_error(error_radius)
+                        self.save_output_img(self.patch_number)
+            else:
+                print('Error')
 
     # -------------------------------- END: sub patch matching placement algorithm --------------------------------
 
@@ -712,64 +838,76 @@ class GraphCutTexture:
 
     def random_fill(self, save_img=False, show_seams=False):
         print('Initial synthesis: Random')
-        overlap_width = self.input_width // 3
-        overlap_height = self.input_height // 3
+        window_width = self.input_width // 5
+        window_height = self.input_height // 5
 
         offset_y = 0
 
         # y is sample in (offset_y-overlap_height, offset_y]
-        y = offset_y - (overlap_height + randint(0, overlap_height - 1))
+        # y = offset_y - (overlap_height + randint(0, overlap_height - 1))
 
-        while True:  # loop y
+        while offset_y < self.output_height:  # loop y
             print('New Row')
             offset_x = 0
             # sample x in [-overlap_width, 0)
-            x = offset_x - (overlap_width + randint(0, overlap_width - 1))
-            while True:  # loop x
-                if y < self.output_height:
+            # x = offset_x - (overlap_width + randint(0, overlap_width - 1))
+            while offset_x < self.output_width:  # loop x
+                self.write_image()
+
+                window_filled_mask = self.output_img_filled_mask[offset_y:offset_y + window_height,
+                                     offset_x:offset_x + window_width]
+                if window_filled_mask.all():
+                    # this window is filled, skip
+                    offset_x += window_width
+                    continue
+
+                y = randint(offset_y - self.input_height + window_height, offset_y)
+                x = randint(offset_x - self.input_width + window_width, offset_x)
+
+                if y < self.output_height and x < self.output_width:
                     res = self.insert_patch(y, x)
                     if res != -1:  # some pixel is added
                         self.patch_number += 1
+                        self.update_seams_max_error()
+
                         if save_img:
                             self.write_image()
                             if show_seams:
                                 self.reveal_seams()
+                                self.reveal_seams_max_error(2)
                             self.save_output_img(self.patch_number)
+                else:
+                    print('Error')
 
-                offset_x += overlap_width  # go to next column
+                offset_x += window_width  # go to next column
 
-                # sample x in [offset_x-overlap_width, offset_x)
-                x = offset_x - (overlap_width + randint(0, overlap_width - 1))
+            offset_y += window_height  # go to next row
 
-                # sample y in [offset_y-overlap_height, offset_y)
-                y = offset_y - (overlap_height + randint(0, overlap_height - 1))
-
-                if x >= self.output_width:
-                    break
-
-            offset_y += overlap_height  # go to next row
-
-            # sample y
-            y = offset_y - (overlap_height + randint(0, overlap_height - 1))
-
-            if y >= self.output_height:
-                break
-
-    def random_refinement(self, iter=20, save_img=False, show_seams=False):
-        overlap_width = self.input_width // 3
-        overlap_height = self.input_height // 3
+    def random_refinement(self, iter=20, error_radius=2, save_img=False, show_seams=False):
+        print('Refinement: Random')
+        window_width = self.input_width // 3
+        window_height = self.input_height // 3
         blending = False
         for k in range(iter):
+            self.write_image()
+            v1y, v1x, v2y, v2x = self.pick_error_region(error_radius)
+
             # sample y and x
-            x = randint(-overlap_width, self.output_width - 1)
-            y = randint(-overlap_height, self.output_height - 1)
-            self.insert_patch(y, x, filling=False, blending=blending, random_refine=True)
+            x = randint(v2x - self.input_width, v1x)
+            y = randint(v2y - self.input_height, v1y)
+            self.insert_patch(y, x, filling=False, blending=blending, random_refine=False, radius=error_radius,
+                              err_p1_y=v1y,
+                              err_p1_x=v1x,
+                              err_p2_y=v2y,
+                              err_p2_x=v2x
+                              )
             self.update_seams_max_error()
             self.patch_number += 1
             if save_img:
                 self.write_image()
                 if show_seams:
                     self.reveal_seams()
+                    self.reveal_seams_max_error(error_radius)
                 self.save_output_img(self.patch_number)
 
     # -------------------------------- END: random placement algorithm --------------------------------
@@ -797,62 +935,170 @@ class GraphCutTexture:
         plt.imshow(self.output_img)
         plt.savefig(name)
 
+    def reveal_seams(self):
+        for j in range(self.output_height):
+            for i in range(self.output_width):
+                node_nb_global = self.get_node_number_global(0, 0, i, j)
+                the_node = self.globalNode[node_nb_global]
+                if not the_node.empty:
+                    if the_node.seamRight or the_node.seamBottom:
+                        for sj in range(-0, 1):
+                            for si in range(-0, 1):
+                                tj = j + sj
+                                ti = i + si
+                                if (0 <= ti < self.output_width) and (0 <= tj < self.output_height):
+                                    self.output_img[tj, ti] = [255, 0, 0]
+
+    def reveal_seams_max_error(self, radius):
+        """
+        draw a rectangle
+        :param radius: rect width = 2*raduis+1
+        :return:
+        """
+        if self.maxErrNodeNbGlobal == -1:
+            return
+        max_err_y, max_err_x = self.get_position_global(self.maxErrNodeNbGlobal)
+        for sj in range(-radius, radius + 1):
+            for si in range(-radius, radius + 1):
+                tj = max_err_y + sj
+                ti = max_err_x + si
+                if 0 <= ti <= self.output_width and tj >= 0 and tj <= self.output_height:
+                    self.output_img[tj, ti] = [255, 0, 255]
+
     # -------------------------------- END: image plot related functions --------------------------------
 
-    def update_seams_max_error(self):
-        nodeNbGlobal = 0
+    def update_seams_max_error(self, radius=0):
+        """
+        find a node with max seam error nearby
+        used for picking error region
+        """
         self.maxErrNodeNbGlobal = -1
         maxErr = -1.0
         bs = self.borderSize
         for j in range(bs, self.output_height - bs):
             for i in range(bs, self.output_width - bs):
+                err_sum = 0.0
                 nodeNbGlobal = self.get_node_number_global(0, 0, i, j)
-                the_node = self.globalNode[nodeNbGlobal]
-                if not the_node.empty:
-                    if the_node.seamRight:
-                        if the_node.rightCost > maxErr:
-                            maxErr = the_node.rightCost
-                            self.maxErrNodeNbGlobal = nodeNbGlobal
 
-                    if the_node.seamBottom:
-                        if the_node.bottomCost > maxErr:
-                            maxErr = the_node.bottomCost
-                            self.maxErrNodeNbGlobal = nodeNbGlobal
+                # all the error nearby
+                for jj in range(-radius, radius + 1):
+                    for ii in range(-radius, radius + 1):
+                        node_neighbor_global = self.get_node_number_global(0, 0, i + ii, j + jj)
+                        neighbor_node = self.globalNode[node_neighbor_global]
+                        if not neighbor_node.empty:
+                            if neighbor_node.seamRight:
+                                err_sum += neighbor_node.rightCost
+                            if neighbor_node.seamBottom:
+                                err_sum += neighbor_node.bottomCost
+                if err_sum > maxErr:
+                    maxErr = err_sum
+                    self.maxErrNodeNbGlobal = nodeNbGlobal
+
+                # nodeNbGlobal = self.get_node_number_global(0, 0, i, j)
+                # the_node = self.globalNode[nodeNbGlobal]
+                # if not the_node.empty:
+                #     if the_node.seamRight:
+                #         if the_node.rightCost > maxErr:
+                #             maxErr = the_node.rightCost
+                #             self.maxErrNodeNbGlobal = nodeNbGlobal
+                #
+                #     if the_node.seamBottom:
+                #         if the_node.bottomCost > maxErr:
+                #             maxErr = the_node.bottomCost
+                #             self.maxErrNodeNbGlobal = nodeNbGlobal
 
         return maxErr
 
-    def computeSSD(self, x, y):
-        v1X = max(0, x) - x
-        v1Y = max(0, y) - y
-        v2X = min(self.output_width - 1, x + self.input_width - 1) - x
-        v2Y = min(self.output_height - 1, y + self.input_height - 1) - y
+    def compute_sub_matching_cost_matrix(self, y_start, y_end, x_start, x_end):
+        # search the error region inside input image
+        error_region_cropped = self.output_img[y_start:y_end + 1, x_start:x_end + 1]
+        cropped_out_mask = self.output_img_filled_mask[y_start:y_end + 1, x_start:x_end + 1]
+        overlap_pixel_count = cropped_out_mask.sum()
 
-        self.croppedInput_w = v2X - v1X + 1
-        self.croppedInput_h = v2Y - v1Y + 1
-        x = max(0, x)
-        y = max(0, y)
-        err = 0.0
-        nbpix = 0
+        err_region_width = x_end - x_start + 1
+        err_region_height = y_end - y_start + 1
+        cost_matrix = np.zeros((self.input_height - err_region_height, self.input_width - err_region_width),
+                               dtype=float)
 
-        cj = 0
-        for j in range(v1Y, v2Y):
-            ci = 0
-            for i in range(v1X, v2X):
-                nodeNbGlobal = self.get_node_number_global(x, y, ci, cj)
-                the_node = self.globalNode[nodeNbGlobal]
-                if (not the_node.empty):
-                    err += square_distance(the_node.color, self.input_img[j, i])
-                    nbpix += 1
-                ci += 1
-            cj += 1
-        if nbpix == 0:
-            return 0
-        else:
-            return err / nbpix
+        cost_j = 0
+        for j in range(self.input_height - err_region_height):
+            cost_i = 0
+            for i in range(self.input_width - err_region_width):
+                sub_patch_input = self.input_img[j:j + err_region_height, i:i + err_region_width]
+                distance = (sub_patch_input - error_region_cropped).sum(axis=2) / 3 * cropped_out_mask
+                distance = distance / 255.0
+                distance_squared = distance * distance
+
+                if overlap_pixel_count > 0:
+                    cost = distance_squared.sum() / overlap_pixel_count
+                    cost_matrix[cost_j, cost_i] = cost
+                else:
+                    cost_matrix[cost_j, cost_i] = 0
+
+                cost_i += 1
+            cost_j += 1
+
+        return cost_matrix
 
     def compute_entire_matching_cost_matrix(self, y_start, y_end, x_start, x_end):
         matrix_height = y_end - y_start
         matrix_width = x_end - x_start
+        output_img_padded = self.add_img_border(self.output_img, matrix_height, self.input_height, matrix_width,
+                                                self.input_width)
+        output_mask_padded = self.add_mask_border(self.output_img_filled_mask, matrix_height, self.input_height,
+                                                  matrix_width, self.input_width)
+
+        # convert from global space to padded global space
+        y_start += matrix_height
+        y_end += matrix_height
+        x_start += matrix_width
+        x_end += matrix_width
+
+        cost_matrix = np.zeros((matrix_height, matrix_width), dtype=float)
+        cost_j = 0
+        for translate_y in range(y_start, y_end):
+            cost_i = 0
+            for translate_x in range(x_start, x_end):
+                cropped_out_img = output_img_padded[translate_y:translate_y + self.input_height,
+                                  translate_x:translate_x + self.input_width]
+                cropped_out_mask = output_mask_padded[translate_y:translate_y + self.input_height,
+                                   translate_x:translate_x + self.input_width]
+                overlap_pixel_count = cropped_out_mask.sum()
+                distance = (self.input_img - cropped_out_img).sum(axis=2) / 3 * cropped_out_mask
+                distance = distance / 255.0
+                distance_squared = distance * distance
+
+                if overlap_pixel_count > 0:
+                    cost = distance_squared.sum() / overlap_pixel_count
+                    cost_matrix[cost_j, cost_i] = cost
+                else:
+                    cost_matrix[cost_j, cost_i] = 0
+
+                cost_i += 1
+            cost_j += 1
+
+        return cost_matrix
+
+
+def test():
+    img_in = imread('data/strawberries2.gif')
+    if img_in.shape[2] == 4:
+        # remove alpha channel
+        img_in = np.array(img_in[:, :, 0:3])
+
+    global out_dir
+    out_dir = 'out/graph_cut_texture'
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+    gc_texture = GraphCutTexture(img_in, img_in.shape[0], img_in.shape[1] * 2)
+    gc_texture.insert_patch(0, 0)
+
+    gc_texture.insert_patch(0, img_in.shape[1] - 80)
+    gc_texture.write_image()
+    gc_texture.save_output_img('test')
+
+    gc_texture.reveal_seams()
+    gc_texture.save_output_img('test-s')
 
 
 if __name__ == "__main__":
@@ -878,15 +1124,15 @@ if __name__ == "__main__":
 
     if placement == 'random':
         gc_texture.random_fill(save_img=True, show_seams=True)
-        gc_texture.random_refinement(iter=20, save_img=True, show_seams=True)
+        gc_texture.random_refinement(iter=40, error_radius=5, save_img=True, show_seams=True)
     elif placement == 'entire':
-        gc_texture.entire_matching_filling(k=0.1)
-        gc_texture.entire_matching_refinement(iter=20)
+        gc_texture.entire_matching_filling(k=0.001, save_img=True, show_seams=True)
+        gc_texture.entire_matching_refinement(iter=10, k=0.001, error_radius=8, save_img=True, show_seams=True)
     elif placement == 'sub':
-        gc_texture.sub_matching_filling(k=0.1)
-        gc_texture.sub_matching_refinement(iter=20)
+        gc_texture.sub_matching_filling(k=0.01, save_img=True, show_seams=True)
+        gc_texture.sub_matching_refinement(iter=30, k=0.01, error_radius=8, save_img=True, show_seams=True)
 
     gc_texture.write_image()
-    # gc_texture.revealSeams()
+    # gc_texture.reveal_seams()
     gc_texture.save_output_img('final')
-    gc_texture.show_output_img()
+    # gc_texture.show_output_img()
