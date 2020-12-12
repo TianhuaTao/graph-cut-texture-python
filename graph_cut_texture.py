@@ -877,7 +877,7 @@ class GraphCutTexture:
 
     # -------------------------------- START: random placement algorithm --------------------------------
 
-    def random_fill(self, save_img=False, show_seams=False):
+    def random_filling(self, save_img=False, show_seams=False):
         print('Initial synthesis: Random')
         window_width = self.input_width // 5
         window_height = self.input_height // 5
@@ -1238,14 +1238,14 @@ def test():
 
 
 if __name__ == "__main__":
-    # data_filename = 'akeyboard_small.gif'
+    data_filename = 'akeyboard_small.gif'
     # data_filename = 'strawberries2.gif'
     # data_filename = 'green.gif'
     # data_filename = 'jelly.gif'
     # data_filename = 'nuts6.gif'
     # data_filename = 'AB_valley.gif'
     # data_filename = 'AB_machu3.gif'
-    data_filename = 'sheep.gif'
+    # data_filename = 'sheep.gif'
 
 
     input_file_path = os.path.join('data', data_filename)
@@ -1269,7 +1269,7 @@ if __name__ == "__main__":
         os.makedirs(out_dir)
 
     if placement == 'random':
-        gc_texture.random_fill(save_img=True, show_seams=True)
+        gc_texture.random_filling(save_img=True, show_seams=True)
         gc_texture.random_refinement(iter=40, error_radius=5, save_img=True, show_seams=True)
     elif placement == 'entire':
         gc_texture.entire_matching_filling(k=0.001, save_img=True, show_seams=True)
