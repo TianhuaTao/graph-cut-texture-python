@@ -148,6 +148,12 @@ def simple_merge(img_in: np.ndarray):
 
 if __name__ == "__main__":
     img_in = imread('data/strawberries2.gif')
+    # # img_in = imread('data/herd_of_sheep.gif')
+    # # img_in = imread('data/sheep.gif')
+    # img_in = imread('data/crowds2.gif')
+    # img_in = imread('data/AB_machu3.gif')
+    # img_in = imread('data/AB_valley.gif')
+
     if img_in.shape[2] == 4:
         # remove alpha channel
         img_in = img_in[:, :, 0:3]

@@ -7,8 +7,9 @@ import random
 from random import randint
 import scipy.ndimage as nd
 import os
+from scipy import signal
 
-random.seed(0)
+# random.seed(0)
 
 plt.figure(num=None, figsize=(40, 32), dpi=80, facecolor='w', edgecolor='k')
 
@@ -17,6 +18,7 @@ infiniteCap = 1e12
 source_type = 0
 sink_type = 1
 out_dir = ''  # assigned in main
+data_filename = ''  # assigned in main
 
 
 def rgb2gray(rgb):
@@ -29,16 +31,18 @@ def square_distance(c1, c2):
 
 
 def abs_distance(c1, c2):
-    return (np.abs(c1 - c2)).sum()
+    diff = c1 / 255.0 - c2 / 255.0
+    dis = np.sqrt((diff * diff).sum())
+    return dis
 
 
 def compute_gradient_image(image):
-    x_kernel = 1 / 3 * np.array([[1, 0, -1],
-                                 [1, 0, -1],
-                                 [1, 0, -1]])
-    y_kernel = 1 / 3 * np.array([[1, 1, 1],
-                                 [0, 0, 0],
-                                 [-1, -1, -1]])
+    x_kernel = np.array([[0, 0, 0],
+                         [1, 0, -1],
+                         [0, 0, 0]])
+    y_kernel = np.array([[0, 1, 0],
+                         [0, 0, 0],
+                         [0, -1, 0]])
     image_gray = rgb2gray(image)
     grad_x = nd.convolve(image_gray, x_kernel, mode='constant')
     grad_y = nd.convolve(image_gray, y_kernel, mode='constant')
@@ -84,8 +88,8 @@ class GraphCutTexture:
         self.input_width = input_img.shape[1]
 
         self.croppedInputImage = None
-        self.croppedInput_w = 0
-        self.croppedInput_h = 0
+        self.cropped_input_w = 0
+        self.cropped_input_h = 0
         self.croppedInputImageGX = None
         self.croppedInputImageGY = None
 
@@ -96,7 +100,7 @@ class GraphCutTexture:
         self.output_img_filled_mask = np.zeros((output_height, output_width), dtype=int)
         self.patch_number = 0
 
-        self.globalNode = [GlobalNode() for _ in range(output_width * output_height)]
+        self.global_nodes = [GlobalNode() for _ in range(output_width * output_height)]
         self.seamNode: [SeamNode] = []
 
         self.inputImageGY, self.inputImageGX = compute_gradient_image(self.input_img)
@@ -111,6 +115,18 @@ class GraphCutTexture:
         self.cropped_right_bottom_input_space = None
         self.cropped_left_top_output_space = None
         self.cropped_right_bottom_output_space = None
+
+        self.linked_to_sink = set()
+        self.linked_to_source = set()
+
+        self.summed_area_table_i_squared = self.calculate_summed_table(self.input_img)
+
+        self.used_offset = set()
+
+    def calculate_summed_table(self, img):
+        input_avg = img.sum(axis=2) / 3 / 255.0
+        i_2 = input_avg * input_avg
+        return i_2.cumsum(axis=0).cumsum(axis=1)
 
     def pick_error_region(self, radius):
         if self.maxErrNodeNbGlobal == -1:
@@ -130,67 +146,67 @@ class GraphCutTexture:
 
     def count_non_overlap(self, x, y):
         no_overlap = 0
-        for j in range(self.croppedInput_h):
-            for i in range(self.croppedInput_w):
+        for j in range(self.cropped_input_h):
+            for i in range(self.cropped_input_w):
                 node_nb_global = self.get_node_number_global(x, y, i, j)
-                if self.globalNode[node_nb_global].empty:
+                if self.global_nodes[node_nb_global].empty:
                     no_overlap += 1
         return no_overlap
 
     def direct_copy_input_to_output(self, y, x):
-        for j in range(self.croppedInput_h):
-            for i in range(self.croppedInput_w):
+        for j in range(self.cropped_input_h):
+            for i in range(self.cropped_input_w):
                 node_nb_global = self.get_node_number_global(x, y, i, j)
-                the_node = self.globalNode[node_nb_global]
+                the_node = self.global_nodes[node_nb_global]
                 if the_node.empty:
                     the_node.color = self.croppedInputImage[j, i]
                     the_node.empty = False
 
     def compute_cropped_output_image(self, y, x):
         image = np.zeros_like(self.croppedInputImage)
-        for j in range(self.croppedInput_h):
-            for i in range(self.croppedInput_w):
+        for j in range(self.cropped_input_h):
+            for i in range(self.cropped_input_w):
                 node_nb_global = self.get_node_number_global(x, y, i, j)
-                if not self.globalNode[node_nb_global].empty:
-                    image[j, i] = self.globalNode[node_nb_global].color
+                if not self.global_nodes[node_nb_global].empty:
+                    image[j, i] = self.global_nodes[node_nb_global].color
                 else:
                     image[j, i] = [0, 0, 0]
         return image
 
     def configure_node_capacity(self, y, x, g, image_gy, image_gx):
         overlap: int = 0
-        for j in range(self.croppedInput_h):
-            for i in range(self.croppedInput_w):
+        for j in range(self.cropped_input_h):
+            for i in range(self.cropped_input_w):
                 node_nb_global = self.get_node_number_global(x, y, i, j)
                 node_nb_local = self.get_node_number_local(i, j)
 
-                if i < self.croppedInput_w - 1:
+                if i < self.cropped_input_w - 1:
                     node_nb_global_right = self.get_node_number_global(x, y, i + 1, j)
                     node_nb_local_right = self.get_node_number_local(i + 1, j)
 
-                    if not self.globalNode[node_nb_global].empty:
-                        if not self.globalNode[node_nb_global_right].empty:  # right
-                            d1 = abs_distance(self.globalNode[node_nb_global].color, self.croppedInputImage[j, i])
-                            d2 = abs_distance(self.globalNode[node_nb_global_right].color,
+                    if not self.global_nodes[node_nb_global].empty:
+                        if not self.global_nodes[node_nb_global_right].empty:  # right
+                            d1 = abs_distance(self.global_nodes[node_nb_global].color, self.croppedInputImage[j, i])
+                            d2 = abs_distance(self.global_nodes[node_nb_global_right].color,
                                               self.croppedInputImage[j, i + 1])
-                            if self.globalNode[node_nb_global].seamRight:
+                            if self.global_nodes[node_nb_global].seamRight:
                                 # Old seam: a seam node will created
-                                capacity1 = self.globalNode[node_nb_global].rightCost
-                                d3 = abs_distance(self.globalNode[node_nb_global_right].colorOtherPatch,
+                                capacity1 = self.global_nodes[node_nb_global].rightCost
+                                d3 = abs_distance(self.global_nodes[node_nb_global_right].colorOtherPatch,
                                                   self.croppedInputImage[j, i + 1])
                                 d4 = abs_distance(self.croppedInputImage[j, i],
-                                                  self.globalNode[node_nb_global].colorOtherPatch)
+                                                  self.global_nodes[node_nb_global].colorOtherPatch)
                                 grad = ((self.croppedInputImageGX[j, i] / 255.0)
                                         + (self.croppedInputImageGX[j, i + 1] / 255.0)
                                         + (image_gx[j, i] / 255.0)
-                                        + (self.globalNode[node_nb_global_right].gradXOtherPatch / 255.0))
+                                        + (self.global_nodes[node_nb_global_right].gradXOtherPatch / 255.0))
                                 grad += 1.0
 
                                 capacity2 = (d1 + d3) / grad
                                 grad = (self.croppedInputImageGX[j, i] / 255.0) \
                                        + (self.croppedInputImageGX[j, i + 1] / 255.0) \
                                        + (image_gx[j, i + 1] / 255.0) \
-                                       + (self.globalNode[node_nb_global].gradXOtherPatch / 255.0)
+                                       + (self.global_nodes[node_nb_global].gradXOtherPatch / 255.0)
                                 grad += 1.0
 
                                 capacity3 = (d4 + d2) / grad
@@ -208,46 +224,46 @@ class GraphCutTexture:
                                 capRight = (d1 + d2) / grad
                                 capRight += minCap
                                 g.add_edge(node_nb_local, node_nb_local_right, capRight, capRight)
-                                self.globalNode[node_nb_global].rightCost = capRight
+                                self.global_nodes[node_nb_global].rightCost = capRight
                             overlap += 1
 
                         else:
                             # No overlap
                             g.add_edge(node_nb_local, node_nb_local_right, 0.0, 0.0)
-                            self.globalNode[node_nb_global].rightCost = 0.0
+                            self.global_nodes[node_nb_global].rightCost = 0.0
                     else:
                         g.add_edge(node_nb_local, node_nb_local_right, 0.0, 0.0)
-                        self.globalNode[node_nb_global].rightCost = 0.0
+                        self.global_nodes[node_nb_global].rightCost = 0.0
 
-                if j < self.croppedInput_h - 1:
+                if j < self.cropped_input_h - 1:
                     nodeNbGlobalBottom = self.get_node_number_global(x, y, i, j + 1)
                     nodeNbLocalBottom = self.get_node_number_local(i, j + 1)
 
-                    if not self.globalNode[node_nb_global].empty:
-                        if not self.globalNode[nodeNbGlobalBottom].empty:  # bottom
+                    if not self.global_nodes[node_nb_global].empty:
+                        if not self.global_nodes[nodeNbGlobalBottom].empty:  # bottom
                             # Overlap
-                            d1 = abs_distance(self.globalNode[node_nb_global].color, self.croppedInputImage[j, i])
-                            d2 = abs_distance(self.globalNode[nodeNbGlobalBottom].color,
+                            d1 = abs_distance(self.global_nodes[node_nb_global].color, self.croppedInputImage[j, i])
+                            d2 = abs_distance(self.global_nodes[nodeNbGlobalBottom].color,
                                               self.croppedInputImage[j + 1, i])
-                            if self.globalNode[node_nb_global].seamBottom:
+                            if self.global_nodes[node_nb_global].seamBottom:
                                 # Old seam: a seam node will created
-                                capacity1 = self.globalNode[node_nb_global].bottomCost
+                                capacity1 = self.global_nodes[node_nb_global].bottomCost
 
-                                d3 = abs_distance(self.globalNode[nodeNbGlobalBottom].colorOtherPatch,
+                                d3 = abs_distance(self.global_nodes[nodeNbGlobalBottom].colorOtherPatch,
                                                   self.croppedInputImage[j + 1, i])
                                 d4 = abs_distance(self.croppedInputImage[j, i],
-                                                  self.globalNode[node_nb_global].colorOtherPatch)
+                                                  self.global_nodes[node_nb_global].colorOtherPatch)
                                 grad = (self.croppedInputImageGY[j, i] / 255.0) \
                                        + (self.croppedInputImageGY[j + 1, i] / 255.0) \
                                        + (image_gy[j, i] / 255.0) \
-                                       + (self.globalNode[nodeNbGlobalBottom].gradYOtherPatch / 255.0)
+                                       + (self.global_nodes[nodeNbGlobalBottom].gradYOtherPatch / 255.0)
                                 grad += 1.0
                                 capacity2 = (d1 + d3) / grad
 
                                 grad = (self.croppedInputImageGY[j, i] / 255.0) \
                                        + (self.croppedInputImageGY[j + 1, i] / 255.0) \
                                        + (image_gy[j + 1, i] / 255.0) \
-                                       + (self.globalNode[node_nb_global].gradYOtherPatch / 255.0)
+                                       + (self.global_nodes[node_nb_global].gradYOtherPatch / 255.0)
                                 grad += 1.0
                                 capacity3 = (d4 + d2) / grad
 
@@ -265,18 +281,18 @@ class GraphCutTexture:
                                 capBottom = (d1 + d2) / grad
                                 capBottom += minCap
                                 g.add_edge(node_nb_local, nodeNbLocalBottom, capBottom, capBottom)
-                                self.globalNode[node_nb_global].bottomCost = capBottom
+                                self.global_nodes[node_nb_global].bottomCost = capBottom
 
                             overlap += 1
 
                         else:
                             # No overlap
                             g.add_edge(node_nb_local, nodeNbLocalBottom, 0.0, 0.0)
-                            self.globalNode[node_nb_global].bottomCost = 0.0
+                            self.global_nodes[node_nb_global].bottomCost = 0.0
                     else:
                         # No overlap
                         g.add_edge(node_nb_local, nodeNbLocalBottom, 0.0, 0.0)
-                        self.globalNode[node_nb_global].bottomCost = 0.0
+                        self.global_nodes[node_nb_global].bottomCost = 0.0
 
         return overlap
 
@@ -299,12 +315,12 @@ class GraphCutTexture:
         self.cropped_left_top_output_space = (y + v1_y, x + v1_x)
         self.cropped_right_bottom_output_space = (y + v2_y, x + v1_x)
 
-        self.croppedInput_w = v2_x - v1_x + 1
-        self.croppedInput_h = v2_y - v1_y + 1
+        self.cropped_input_w = v2_x - v1_x + 1
+        self.cropped_input_h = v2_y - v1_y + 1
 
         # print('Cropped patch size: {} * {}'.format(self.croppedInput_w, self.croppedInput_h))
 
-        if self.croppedInput_w == 0 or self.croppedInput_h == 0:
+        if self.cropped_input_w == 0 or self.cropped_input_h == 0:
             print("Patch lies outside output texture")
             return -1
 
@@ -316,13 +332,12 @@ class GraphCutTexture:
         x = max(0, x)
         y = max(0, y)
 
-        # overlap_mask = self.output_img_filled_mask[y:y + self.croppedInput_h, x:x + self.croppedInput_w]
-        #
-        # no_overlap = (1 - overlap_mask).sum()
+        self.linked_to_sink = set()
+        self.linked_to_source = set()
 
         no_overlap = self.count_non_overlap(x, y)
 
-        if no_overlap == self.croppedInput_w * self.croppedInput_h:
+        if no_overlap == self.cropped_input_w * self.cropped_input_h:
             print("No overlap detected")
             self.direct_copy_input_to_output(y=y, x=x)
             return 0
@@ -335,9 +350,9 @@ class GraphCutTexture:
         imageGY, imageGX = compute_gradient_image(image)
 
         # Graph construction
-        nb_nodes = self.croppedInput_w * self.croppedInput_h
-        nb_edges = (self.croppedInput_w - 1) * (self.croppedInput_h - 1) * 2 + (self.croppedInput_w - 1) + (
-                self.croppedInput_h - 1)
+        nb_nodes = self.cropped_input_w * self.cropped_input_h
+        nb_edges = (self.cropped_input_w - 1) * (self.cropped_input_h - 1) * 2 + (self.cropped_input_w - 1) + (
+                self.cropped_input_h - 1)
         nb_seam_nodes = nb_edges
         nb_edges += nb_seam_nodes
 
@@ -376,14 +391,14 @@ class GraphCutTexture:
         if blending:
             pass
         else:
-            for j in range(self.croppedInput_h):
-                for i in range(self.croppedInput_w):
+            for j in range(self.cropped_input_h):
+                for i in range(self.cropped_input_w):
                     node_nb_global = self.get_node_number_global(x, y, i, j)
-                    the_node = self.globalNode[node_nb_global]
-                    if self.globalNode[node_nb_global].empty:
+                    the_node = self.global_nodes[node_nb_global]
+                    if self.global_nodes[node_nb_global].empty:
                         # New pixel insertion
-                        self.globalNode[node_nb_global].color = self.croppedInputImage[j, i]
-                        self.globalNode[node_nb_global].empty = False
+                        self.global_nodes[node_nb_global].color = self.croppedInputImage[j, i]
+                        self.global_nodes[node_nb_global].empty = False
                     else:
                         if g.get_segment(self.get_node_number_local(i, j)) == source_type:
                             the_node.colorOtherPatch = self.croppedInputImage[j, i]
@@ -405,72 +420,72 @@ class GraphCutTexture:
 
     def process_seams(self, y, x, g):
         k = 0
-        for j in range(self.croppedInput_h):
-            for i in range(self.croppedInput_w):
+        for j in range(self.cropped_input_h):
+            for i in range(self.cropped_input_w):
                 node_nb_global = self.get_node_number_global(x, y, i, j)
-                nodeNbLocal = self.get_node_number_local(i, j)
-                the_node = self.globalNode[node_nb_global]
-                if i < self.croppedInput_w - 1:
-                    if g.get_segment(nodeNbLocal) != g.get_segment(self.get_node_number_local(i + 1, j)):
+                node_nb_local = self.get_node_number_local(i, j)
+                the_node = self.global_nodes[node_nb_global]
+                if i < self.cropped_input_w - 1:
+                    if g.get_segment(node_nb_local) != g.get_segment(self.get_node_number_local(i + 1, j)):
                         the_node.newSeam = True
 
-                if j < self.croppedInput_h - 1:
-                    if g.get_segment(nodeNbLocal) != g.get_segment(self.get_node_number_local(i, j + 1)):
+                if j < self.cropped_input_h - 1:
+                    if g.get_segment(node_nb_local) != g.get_segment(self.get_node_number_local(i, j + 1)):
                         the_node.newSeam = True
 
-                if len(self.seamNode) and (k < len(self.seamNode)) and (nodeNbLocal == self.seamNode[k].start):
+                if len(self.seamNode) and (k < len(self.seamNode)) and (node_nb_local == self.seamNode[k].start):
                     # Process old seam
                     currentSeamNode = self.seamNode[k].seam
                     currentSeamNodeEnd = self.seamNode[k].end
 
-                    if g.get_segment(nodeNbLocal) == source_type and g.get_segment(currentSeamNodeEnd) == sink_type:
+                    if g.get_segment(node_nb_local) == source_type and g.get_segment(currentSeamNodeEnd) == sink_type:
                         # Old seam remains with new seam cost
                         if g.get_segment(currentSeamNode) == source_type:
                             if self.seamNode[k].orientation == 0:
                                 # Right
-                                self.globalNode[node_nb_global].rightCost = self.seamNode[k].capacity3
-                                self.globalNode[node_nb_global].seamRight = True
+                                self.global_nodes[node_nb_global].rightCost = self.seamNode[k].capacity3
+                                self.global_nodes[node_nb_global].seamRight = True
                             else:
                                 # Bottom
-                                self.globalNode[node_nb_global].bottomCost = self.seamNode[k].capacity3
-                                self.globalNode[node_nb_global].seamBottom = True
+                                self.global_nodes[node_nb_global].bottomCost = self.seamNode[k].capacity3
+                                self.global_nodes[node_nb_global].seamBottom = True
 
                         else:
                             # Old seam remains with new seam cost
                             if self.seamNode[k].orientation == 0:
                                 # Right
-                                self.globalNode[node_nb_global].rightCost = self.seamNode[k].capacity2
-                                self.globalNode[node_nb_global].seamRight = True
+                                self.global_nodes[node_nb_global].rightCost = self.seamNode[k].capacity2
+                                self.global_nodes[node_nb_global].seamRight = True
                             else:
                                 # Bottom
-                                self.globalNode[node_nb_global].bottomCost = self.seamNode[k].capacity2
-                                self.globalNode[node_nb_global].seamBottom = True
-                    elif g.get_segment(nodeNbLocal) == sink_type and g.get_segment(currentSeamNodeEnd) == source_type:
+                                self.global_nodes[node_nb_global].bottomCost = self.seamNode[k].capacity2
+                                self.global_nodes[node_nb_global].seamBottom = True
+                    elif g.get_segment(node_nb_local) == sink_type and g.get_segment(currentSeamNodeEnd) == source_type:
                         if g.get_segment(currentSeamNode) == source_type:
                             if self.seamNode[k].orientation == 0:
                                 # Right
-                                self.globalNode[node_nb_global].rightCost = self.seamNode[k].capacity2
-                                self.globalNode[node_nb_global].seamRight = True
+                                self.global_nodes[node_nb_global].rightCost = self.seamNode[k].capacity2
+                                self.global_nodes[node_nb_global].seamRight = True
                             else:
                                 # Bottom
-                                self.globalNode[node_nb_global].bottomCost = self.seamNode[k].capacity2
-                                self.globalNode[node_nb_global].seamBottom = True
+                                self.global_nodes[node_nb_global].bottomCost = self.seamNode[k].capacity2
+                                self.global_nodes[node_nb_global].seamBottom = True
                         else:
                             if self.seamNode[k].orientation == 0:
                                 # Right
-                                self.globalNode[node_nb_global].rightCost = self.seamNode[k].capacity3
-                                self.globalNode[node_nb_global].seamRight = True
+                                self.global_nodes[node_nb_global].rightCost = self.seamNode[k].capacity3
+                                self.global_nodes[node_nb_global].seamRight = True
                             else:
                                 # Bottom
-                                self.globalNode[node_nb_global].bottomCost = self.seamNode[k].capacity3
-                                self.globalNode[node_nb_global].seamBottom = True
+                                self.global_nodes[node_nb_global].bottomCost = self.seamNode[k].capacity3
+                                self.global_nodes[node_nb_global].seamBottom = True
                     elif g.get_segment(currentSeamNode) == source_type:
                         if self.seamNode[k].orientation == 0:
-                            self.globalNode[node_nb_global].rightCost = self.seamNode[k].capacity1
-                            self.globalNode[node_nb_global].seamRight = True
+                            self.global_nodes[node_nb_global].rightCost = self.seamNode[k].capacity1
+                            self.global_nodes[node_nb_global].seamRight = True
                         else:
-                            self.globalNode[node_nb_global].bottomCost = self.seamNode[k].capacity1
-                            self.globalNode[node_nb_global].seamBottom = True
+                            self.global_nodes[node_nb_global].bottomCost = self.seamNode[k].capacity1
+                            self.global_nodes[node_nb_global].seamBottom = True
 
                     else:
                         pass
@@ -478,13 +493,13 @@ class GraphCutTexture:
                     k += 1
                 else:
                     # New seam
-                    if i < self.croppedInput_w - 1:
-                        if g.get_segment(nodeNbLocal) != g.get_segment(self.get_node_number_local(i + 1, j)):
-                            self.globalNode[node_nb_global].seamRight = True
+                    if i < self.cropped_input_w - 1:
+                        if g.get_segment(node_nb_local) != g.get_segment(self.get_node_number_local(i + 1, j)):
+                            self.global_nodes[node_nb_global].seamRight = True
 
-                    if j < self.croppedInput_h - 1:
-                        if g.get_segment(nodeNbLocal) != g.get_segment(self.get_node_number_local(i, j + 1)):
-                            self.globalNode[node_nb_global].seamBottom = True
+                    if j < self.cropped_input_h - 1:
+                        if g.get_segment(node_nb_local) != g.get_segment(self.get_node_number_local(i, j + 1)):
+                            self.global_nodes[node_nb_global].seamBottom = True
 
     def add_seam_node(self, g, node_ids):
         for i in range(len(self.seamNode)):
@@ -496,51 +511,55 @@ class GraphCutTexture:
             self.num_sink += 1
 
     def link_source_node(self, y, x, g):
-        for i in range(self.croppedInput_w):
+        for i in range(self.cropped_input_w):
             j = 0
             node_nb_global = self.get_node_number_global(x, y, i, j)
-            if not self.globalNode[node_nb_global].empty:
+            if not self.global_nodes[node_nb_global].empty:
                 g.add_tedge(self.get_node_number_local(i, j), infiniteCap, 0.0)
+                self.linked_to_source.add(self.get_node_number_local(i, j))
 
-            j = self.croppedInput_h - 1
+            j = self.cropped_input_h - 1
             node_nb_global = self.get_node_number_global(x, y, i, j)
-            if not self.globalNode[node_nb_global].empty:
+            if not self.global_nodes[node_nb_global].empty:
                 g.add_tedge(self.get_node_number_local(i, j), infiniteCap, 0.0)
+                self.linked_to_source.add(self.get_node_number_local(i, j))
 
-        for j in range(self.croppedInput_h):
+        for j in range(self.cropped_input_h):
             i = 0
             node_nb_global = self.get_node_number_global(x, y, i, j)
-            if not self.globalNode[node_nb_global].empty:
+            if not self.global_nodes[node_nb_global].empty:
                 g.add_tedge(self.get_node_number_local(i, j), infiniteCap, 0.0)
+                self.linked_to_source.add(self.get_node_number_local(i, j))
 
-            i = self.croppedInput_w - 1
+            i = self.cropped_input_w - 1
             node_nb_global = self.get_node_number_global(x, y, i, j)
-            if not self.globalNode[node_nb_global].empty:
+            if not self.global_nodes[node_nb_global].empty:
                 g.add_tedge(self.get_node_number_local(i, j), infiniteCap, 0.0)
+                self.linked_to_source.add(self.get_node_number_local(i, j))
 
     def link_sink_node(self, y, x, g, filling, random_refine, radius, err_p1_y, err_p1_x, err_p2_y, err_p2_x):
         if filling:
             print('Filling patch ', self.patch_number)
-            for j in range(self.croppedInput_h):
-                for i in range(self.croppedInput_w):
+            for j in range(self.cropped_input_h):
+                for i in range(self.cropped_input_w):
                     node_nb_global = self.get_node_number_global(x, y, i, j)
-                    if not self.globalNode[node_nb_global].empty:
+                    if not self.global_nodes[node_nb_global].empty:
                         nodeNbGlobalLeft = self.get_node_number_global(x, y, i - 1, j)
                         nodeNbGlobalRight = self.get_node_number_global(x, y, i + 1, j)
                         nodeNbGlobalTop = self.get_node_number_global(x, y, i, j - 1)
                         nodeNbGlobalBottom = self.get_node_number_global(x, y, i, j + 1)
 
                         # empty left, right, top, bottom
-                        if (nodeNbGlobalLeft != -1) and self.globalNode[nodeNbGlobalLeft].empty:
+                        if (nodeNbGlobalLeft != -1) and self.global_nodes[nodeNbGlobalLeft].empty:
                             g.add_tedge(self.get_node_number_local(i, j), 0.0, infiniteCap)
                             self.num_sink += 1
-                        elif (nodeNbGlobalTop != -1) and self.globalNode[nodeNbGlobalTop].empty:
+                        elif (nodeNbGlobalTop != -1) and self.global_nodes[nodeNbGlobalTop].empty:
                             g.add_tedge(self.get_node_number_local(i, j), 0.0, infiniteCap)
                             self.num_sink += 1
-                        elif (nodeNbGlobalRight != -1) and self.globalNode[nodeNbGlobalRight].empty:
+                        elif (nodeNbGlobalRight != -1) and self.global_nodes[nodeNbGlobalRight].empty:
                             g.add_tedge(self.get_node_number_local(i, j), 0.0, infiniteCap)
                             self.num_sink += 1
-                        elif (nodeNbGlobalBottom != -1) and self.globalNode[nodeNbGlobalBottom].empty:
+                        elif (nodeNbGlobalBottom != -1) and self.global_nodes[nodeNbGlobalBottom].empty:
                             g.add_tedge(self.get_node_number_local(i, j), 0.0, infiniteCap)
                             self.num_sink += 1
                     else:
@@ -573,7 +592,11 @@ class GraphCutTexture:
                         i_local = i - self.cropped_left_top_output_space[1]
 
                         node_nb_local = self.get_node_number_local(i_local, j_local)
-                        g.add_tedge(node_nb_local, 0.0, infiniteCap)
+                        if node_nb_local not in self.linked_to_source:
+                            g.add_tedge(node_nb_local, 0.0, infiniteCap)
+                        else:
+                            # print('linked to source')
+                            pass
                         self.num_sink += 1
                         err_node += 1
                 # print('error node', err_node)
@@ -583,8 +606,8 @@ class GraphCutTexture:
                     # at least one pixel from new patch should be added
                     # so add the center pixel to sink
                     # this should not happen very often
-                    j = self.croppedInput_h // 2
-                    i = self.croppedInput_w // 2
+                    j = self.cropped_input_h // 2
+                    i = self.cropped_input_w // 2
                     node_nb_local = self.get_node_number_local(i, j)
                     # node_nb_global = self.getNodeNbGlobal(x, y, i, j)
                     g.add_tedge(node_nb_local, 0.0, infiniteCap)
@@ -598,7 +621,7 @@ class GraphCutTexture:
     # -------------------------------- START: helper function --------------------------------
 
     def get_node_number_local(self, i: int, j: int) -> int:
-        return i + self.croppedInput_w * j
+        return i + self.cropped_input_w * j
 
     def get_node_number_global(self, x, y, i, j) -> int:
         if (x + i < self.output_width) and (x + i >= 0) and (y + j < self.output_height) and (y + j >= 0):
@@ -689,14 +712,15 @@ class GraphCutTexture:
 
                         if save_img:
                             self.write_image()
+                            self.save_output_img(self.patch_number)
                             if show_seams:
                                 self.reveal_seams()
                                 self.reveal_seams_max_error(2)
-                            self.save_output_img(self.patch_number)
+                                self.save_output_img(str(self.patch_number) + '_s')
                 else:
                     print('Error')
 
-                offset_x += window_width  # go to next column
+                offset_x += window_width - window_width // 4  # go to next column
 
                 # if offset_x > self.output_width:
                 #     break
@@ -707,7 +731,7 @@ class GraphCutTexture:
                 # if x >= self.output_width:
                 #     break
 
-            offset_y += window_height  # go to next row
+            offset_y += window_height - window_height // 4  # go to next row
 
             # if offset_y > self.output_height:
             #     break
@@ -767,10 +791,11 @@ class GraphCutTexture:
 
                     if save_img:
                         self.write_image()
+                        self.save_output_img(self.patch_number)
                         if show_seams:
                             self.reveal_seams()
                             self.reveal_seams_max_error(error_radius)
-                        self.save_output_img(self.patch_number)
+                            self.save_output_img(str(self.patch_number) + '_s')
             else:
                 print('Error')
 
@@ -782,6 +807,7 @@ class GraphCutTexture:
 
     def sub_matching_refinement(self, iter=20, k=0.1, error_radius=2, save_img=False, show_seams=False):
         print('Refinement: Sub Patch matching')
+        self.used_offset = set()
         for j in range(iter):
             self.write_image()
             v1y, v1x, v2y, v2x = self.pick_error_region(error_radius)
@@ -791,27 +817,40 @@ class GraphCutTexture:
             # p2x = v1x
 
             # calculate cost matrix
-            cost_matrix = self.compute_sub_matching_cost_matrix(
+            # cost_matrix = self.compute_sub_matching_cost_matrix(
+            #     y_start=v1y,
+            #     y_end=v2y,
+            #     x_start=v1x,
+            #     x_end=v2x)
+
+            cost_matrix = self.compute_sub_matching_cost_matrix_fft(
                 y_start=v1y,
                 y_end=v2y,
                 x_start=v1x,
                 x_end=v2x)
 
-            probs = np.exp(-cost_matrix / self.sig2 / k)
-            if probs.sum() == 0.0:
-                print('k is too small, all probs is zero')
-                probs[np.where(cost_matrix == np.min(cost_matrix))] = 1
-                probs = probs / probs.sum()  # all probabilities should add up to one
+            while True:
+                probs = np.exp(-cost_matrix / self.sig2 / k)
+                if probs.sum() == 0.0:
+                    print('k is too small, all probs is zero')
+                    probs[np.where(cost_matrix == np.min(cost_matrix))] = 1
+                    probs = probs / probs.sum()  # all probabilities should add up to one
 
-            else:
-                probs = probs / probs.sum()  # all probabilities should add up to one
-            probs = probs.reshape((-1,))
-            index = np.random.choice(probs.shape[0], p=probs)
-            index_x = index % cost_matrix.shape[1]
-            index_y = index // cost_matrix.shape[1]
+                else:
+                    probs = probs / probs.sum()  # all probabilities should add up to one
+                probs = probs.reshape((-1,))
+                index = np.random.choice(probs.shape[0], p=probs)
+                index_x = index % cost_matrix.shape[1]
+                index_y = index // cost_matrix.shape[1]
 
-            y = v1y - index_y
-            x = v1x - index_x
+                y = v1y - index_y
+                x = v1x - index_x
+
+                if (y, x) in self.used_offset:
+                    cost_matrix[index_y, index_x] = 10000
+                    # sample again
+                else:
+                    break
 
             if y < self.output_height and x < self.output_width:
                 res = self.insert_patch(y, x, filling=False, radius=error_radius, random_refine=False,
@@ -820,15 +859,17 @@ class GraphCutTexture:
                                         err_p2_y=v2y,
                                         err_p2_x=v2x)
                 if res != -1:  # some pixel is added
+                    self.used_offset.add((y, x))
                     self.patch_number += 1
                     self.update_seams_max_error(radius=error_radius)
 
                     if save_img:
                         self.write_image()
+                        self.save_output_img(self.patch_number)
                         if show_seams:
                             self.reveal_seams()
                             self.reveal_seams_max_error(error_radius)
-                        self.save_output_img(self.patch_number)
+                            self.save_output_img(str(self.patch_number) + '_s')
             else:
                 print('Error')
 
@@ -872,10 +913,11 @@ class GraphCutTexture:
 
                         if save_img:
                             self.write_image()
+                            self.save_output_img(self.patch_number)
                             if show_seams:
                                 self.reveal_seams()
                                 self.reveal_seams_max_error(2)
-                            self.save_output_img(self.patch_number)
+                                self.save_output_img(str(self.patch_number) + '_s')
                 else:
                     print('Error')
 
@@ -905,10 +947,11 @@ class GraphCutTexture:
             self.patch_number += 1
             if save_img:
                 self.write_image()
+                self.save_output_img(self.patch_number)
                 if show_seams:
                     self.reveal_seams()
                     self.reveal_seams_max_error(error_radius)
-                self.save_output_img(self.patch_number)
+                    self.save_output_img(str(self.patch_number) + '_s')
 
     # -------------------------------- END: random placement algorithm --------------------------------
 
@@ -916,7 +959,7 @@ class GraphCutTexture:
     def write_image(self):
         for j in range(self.output_height):
             for i in range(self.output_width):
-                the_node = self.globalNode[self.get_node_number_global(0, 0, i, j)]
+                the_node = self.global_nodes[self.get_node_number_global(0, 0, i, j)]
                 if not the_node.empty:
                     self.output_img[j, i] = the_node.color
                     self.output_img_filled_mask[j, i] = 1
@@ -930,7 +973,9 @@ class GraphCutTexture:
         plt.show()
 
     def save_output_img(self, patch_id):
-        name = os.path.join(out_dir, 'out_{}.png'.format(patch_id))
+        file_basename = os.path.basename(data_filename)
+        file_basename_no_ext = os.path.splitext(file_basename)[0]
+        name = os.path.join(out_dir, '{}_{}.png'.format(file_basename_no_ext, patch_id))
         plt.figure(num=None, figsize=(20, 16), dpi=80, facecolor='w', edgecolor='k')
         plt.imshow(self.output_img)
         plt.savefig(name)
@@ -939,7 +984,7 @@ class GraphCutTexture:
         for j in range(self.output_height):
             for i in range(self.output_width):
                 node_nb_global = self.get_node_number_global(0, 0, i, j)
-                the_node = self.globalNode[node_nb_global]
+                the_node = self.global_nodes[node_nb_global]
                 if not the_node.empty:
                     if the_node.seamRight or the_node.seamBottom:
                         for sj in range(-0, 1):
@@ -984,7 +1029,7 @@ class GraphCutTexture:
                 for jj in range(-radius, radius + 1):
                     for ii in range(-radius, radius + 1):
                         node_neighbor_global = self.get_node_number_global(0, 0, i + ii, j + jj)
-                        neighbor_node = self.globalNode[node_neighbor_global]
+                        neighbor_node = self.global_nodes[node_neighbor_global]
                         if not neighbor_node.empty:
                             if neighbor_node.seamRight:
                                 err_sum += neighbor_node.rightCost
@@ -995,7 +1040,7 @@ class GraphCutTexture:
                     self.maxErrNodeNbGlobal = nodeNbGlobal
 
                 # nodeNbGlobal = self.get_node_number_global(0, 0, i, j)
-                # the_node = self.globalNode[nodeNbGlobal]
+                # the_node = self.global_nodes[nodeNbGlobal]
                 # if not the_node.empty:
                 #     if the_node.seamRight:
                 #         if the_node.rightCost > maxErr:
@@ -1017,13 +1062,15 @@ class GraphCutTexture:
 
         err_region_width = x_end - x_start + 1
         err_region_height = y_end - y_start + 1
-        cost_matrix = np.zeros((self.input_height - err_region_height, self.input_width - err_region_width),
+        possible_translation_height = self.input_height - err_region_height + 1
+        possible_translation_width = self.input_width - err_region_width + 1
+        cost_matrix = np.zeros((possible_translation_height, possible_translation_width),
                                dtype=float)
 
         cost_j = 0
-        for j in range(self.input_height - err_region_height):
+        for j in range(possible_translation_height):
             cost_i = 0
-            for i in range(self.input_width - err_region_width):
+            for i in range(possible_translation_width):
                 sub_patch_input = self.input_img[j:j + err_region_height, i:i + err_region_width]
                 distance = (sub_patch_input - error_region_cropped).sum(axis=2) / 3 * cropped_out_mask
                 distance = distance / 255.0
@@ -1040,9 +1087,95 @@ class GraphCutTexture:
 
         return cost_matrix
 
+    def compute_sub_matching_cost_matrix_fft(self, y_start, y_end, x_start, x_end):
+        # search the error region inside input image
+        error_region_cropped = self.output_img[y_start:y_end + 1, x_start:x_end + 1]
+        # cropped_out_mask = self.output_img_filled_mask[y_start:y_end + 1, x_start:x_end + 1]
+        # overlap_pixel_count = cropped_out_mask.sum()
+        overlap_pixel_count = (y_end + 1 - y_start) * (x_end + 1 - x_start)
+
+        err_region_width = x_end - x_start + 1
+        err_region_height = y_end - y_start + 1
+
+        possible_translation_height = self.input_height - err_region_height + 1
+        possible_translation_width = self.input_width - err_region_width + 1
+
+        # cost_matrix = np.zeros((possible_translation_height, possible_translation_width),
+        #                        dtype=float)
+        #
+        # tmp = error_region_cropped- self.input_img[:err_region_height, : err_region_width]
+        # tmp = tmp/255.0
+        # tmp = tmp.sum(axis=2) / 3
+        # tmp = tmp*tmp
+        # tmp = tmp.sum() / overlap_pixel_count
+
+        # assert cropped_out_mask.all()
+
+        input_avg = self.input_img.sum(axis=2) / 3 / 255.0
+        err_avg = error_region_cropped.sum(axis=2) / 3 / 255.0
+        # i_2 = (self.input_img/255.0)*(self.input_img/255.0)
+        i_2 = input_avg * input_avg
+        term_1 = signal.fftconvolve(i_2, np.ones_like(err_avg), mode='valid')
+        term_1 = term_1.reshape(term_1.shape[0], term_1.shape[1])
+        #
+        # term1 = np.roll(self.summed_area_table_i_squared, shift=(-err_region_height, -err_region_width), axis=(0, 1)) \
+        #         - np.roll(self.summed_area_table_i_squared, shift=-err_region_height, axis=0) \
+        #         - np.roll(self.summed_area_table_i_squared, shift=-err_region_width, axis=1) \
+        #         + self.summed_area_table_i_squared
+        # term1 = term1[:possible_translation_height, :possible_translation_width]
+        # print(term1 - term_1)
+        term_2 = (error_region_cropped / 255.0).sum(axis=2) / 3
+        term_2 = term_2 * term_2
+        term_2 = term_2.sum()
+
+        cost_conv = signal.fftconvolve(input_avg, np.flip(err_avg, axis=(0, 1)), mode='valid')
+        cost_conv = cost_conv.reshape(cost_conv.shape[0], cost_conv.shape[1])
+
+        cost_all = term_1 + term_2 - 2 * cost_conv
+        cost_all = cost_all / overlap_pixel_count
+
+        # cost_j = 0
+        # for j in range(self.input_height - err_region_height+1):
+        #     cost_i = 0
+        #     for i in range(self.input_width - err_region_width+1):
+        #         sub_patch_input = self.input_img[j:j + err_region_height, i:i + err_region_width]
+        #         distance = (sub_patch_input - error_region_cropped).sum(axis=2) / 3
+        #         distance = distance / 255.0
+        #         distance_squared = distance * distance
+        #
+        #         if overlap_pixel_count > 0:
+        #             cost = distance_squared.sum() / overlap_pixel_count
+        #             cost_matrix[cost_j, cost_i] = cost
+        #         else:
+        #             cost_matrix[cost_j, cost_i] = 0
+        #
+        #         cost_i += 1
+        #     cost_j += 1
+        #
+        # plt.subplot(1,2,1)
+        #
+        # fig, (ax_cost_fft, ax_cost, ax_diff) = plt.subplots(3, 1,
+        #                                                      figsize=(6, 15))
+        # ax_cost_fft.imshow(cost_all, cmap='gray')
+        # ax_cost_fft.set_title('Cost matrix by FFT')
+        # # ax_cost_fft.set_axis_off()
+        # ax_cost.imshow(cost_matrix, cmap='gray')
+        # ax_cost.set_title('Cost matrix by naive search')
+        # # ax_cost.set_axis_off()
+        # im =ax_diff.imshow(np.abs(cost_all-cost_matrix), cmap='gray')
+        # ax_diff.set_title('Cost matrix difference')
+        # fig.colorbar(im)
+        # # ax_diff.set_axis_off()
+        # fig.show()
+        # # print('max',cost_matrix.max(), cost_all.max())
+        #
+        # # print('min',cost_matrix.min(), cost_all.min())
+        # print(tmp, cost_matrix[0,0], cost_all[0,0])
+        return cost_all
+
     def compute_entire_matching_cost_matrix(self, y_start, y_end, x_start, x_end):
-        matrix_height = y_end - y_start
-        matrix_width = x_end - x_start
+        matrix_height = y_end - y_start + 1
+        matrix_width = x_end - x_start + 1
         output_img_padded = self.add_img_border(self.output_img, matrix_height, self.input_height, matrix_width,
                                                 self.input_width)
         output_mask_padded = self.add_mask_border(self.output_img_filled_mask, matrix_height, self.input_height,
@@ -1056,9 +1189,9 @@ class GraphCutTexture:
 
         cost_matrix = np.zeros((matrix_height, matrix_width), dtype=float)
         cost_j = 0
-        for translate_y in range(y_start, y_end):
+        for translate_y in range(y_start, y_end + 1):
             cost_i = 0
-            for translate_x in range(x_start, x_end):
+            for translate_x in range(x_start, x_end + 1):
                 cropped_out_img = output_img_padded[translate_y:translate_y + self.input_height,
                                   translate_x:translate_x + self.input_width]
                 cropped_out_mask = output_mask_padded[translate_y:translate_y + self.input_height,
@@ -1093,7 +1226,7 @@ def test():
     gc_texture = GraphCutTexture(img_in, img_in.shape[0], img_in.shape[1] * 2)
     gc_texture.insert_patch(0, 0)
 
-    gc_texture.insert_patch(0, img_in.shape[1] - 80)
+    gc_texture.insert_patch(0, img_in.shape[1] - 100)
     gc_texture.write_image()
     gc_texture.save_output_img('test')
 
@@ -1101,19 +1234,28 @@ def test():
     gc_texture.save_output_img('test-s')
 
 
+# test()
+
+
 if __name__ == "__main__":
-    img_in = imread('data/strawberries2.gif')
-    # img_in = imread('data/green.gif')
-    # img_in = imread('data/akeyboard_small.gif')
-    if img_in.shape[2] == 4:
+    # data_filename = 'akeyboard_small.gif'
+    # data_filename = 'strawberries2.gif'
+    # data_filename = 'green.gif'
+    # data_filename = 'jelly.gif'
+    # data_filename = 'nuts6.gif'
+    # data_filename = 'AB_valley.gif'
+    # data_filename = 'AB_machu3.gif'
+    data_filename = 'sheep.gif'
+
+
+    input_file_path = os.path.join('data', data_filename)
+
+    img_in = imread(input_file_path)
+    if len(img_in.shape) == 3 and img_in.shape[2] == 4:
         # remove alpha channel
         img_in = np.array(img_in[:, :, 0:3])
 
     print('original image size: ', img_in.shape)
-
-    out_dir = 'out/graph_cut_texture'
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
 
     gc_texture = GraphCutTexture(img_in, img_in.shape[0] * 2, img_in.shape[1] * 2)
 
@@ -1122,15 +1264,19 @@ if __name__ == "__main__":
         print('unknown placement method', )
         exit(1)
 
+    out_dir = os.path.join('out/graph_cut_texture', placement)
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
     if placement == 'random':
         gc_texture.random_fill(save_img=True, show_seams=True)
         gc_texture.random_refinement(iter=40, error_radius=5, save_img=True, show_seams=True)
     elif placement == 'entire':
         gc_texture.entire_matching_filling(k=0.001, save_img=True, show_seams=True)
-        gc_texture.entire_matching_refinement(iter=10, k=0.001, error_radius=8, save_img=True, show_seams=True)
+        gc_texture.entire_matching_refinement(iter=20, k=0.001, error_radius=8, save_img=True, show_seams=True)
     elif placement == 'sub':
         gc_texture.sub_matching_filling(k=0.01, save_img=True, show_seams=True)
-        gc_texture.sub_matching_refinement(iter=30, k=0.01, error_radius=8, save_img=True, show_seams=True)
+        gc_texture.sub_matching_refinement(iter=40, k=0.01, error_radius=8, save_img=True, show_seams=True)
 
     gc_texture.write_image()
     # gc_texture.reveal_seams()
