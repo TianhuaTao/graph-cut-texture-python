@@ -570,21 +570,7 @@ class GraphCutTexture:
             # Refinement
             print('Refinement patch ', self.patch_number)
             if not random_refine:
-                # outputX = inputX + tX
-                # outputY = inputY + tY
-                # v1_x = max(0, outputX)
-                # v1_y = max(0, outputY)
-                # v2_x = min(self.output_width - 1, outputX + radius - 1)
-                # v2_y = min(self.output_height - 1, outputY + radius - 1)
-                # # Subpatch origin coordinates in output space
-                # outputX = v1_x
-                # outputY = v1_y
-                # # Subpatch origin coordinates in input space
-                # inputX = outputX - tX
-                # inputY = outputY - tY
-                #
-                # cj = 0
-                # ci = 0
+
                 err_node = 0
                 for j in range(err_p1_y, err_p2_y + 1):
                     for i in range(err_p1_x, err_p2_x + 1):
@@ -660,17 +646,10 @@ class GraphCutTexture:
 
         offset_y = 0
 
-        used_cost = np.zeros((self.output_height, self.output_width), dtype=bool)
-        # # y is sample in (offset_y-overlap_height, offset_y]
-        # y = offset_y - (window_height + randint(0, window_height - 1))
-
-        # y = randint(offset_y - self.input_height + window_height, offset_y - 1)
         while offset_y < self.output_height:  # loop y
             print('New Row')
             offset_x = 0
-            # # sample x in [-overlap_width, 0)
-            # x = offset_x - (window_width + randint(0, window_width - 1))
-            # x = randint(offset_x - self.input_width + window_width, offset_x - 1)
+
             while offset_x < self.output_width:  # loop x
                 self.write_image()
 
@@ -722,24 +701,7 @@ class GraphCutTexture:
 
                 offset_x += window_width - window_width // 4  # go to next column
 
-                # if offset_x > self.output_width:
-                #     break
-                # the x candidate is in [offset_x-input_width+window_width, offset_x)
-                # the y candidate is in [offset_y-input_height+window_height, offset_y)
-
-                # min_cost = cost_matrix[index_y,index_x]
-                # if x >= self.output_width:
-                #     break
-
             offset_y += window_height - window_height // 4  # go to next row
-
-            # if offset_y > self.output_height:
-            #     break
-            # # sample y
-            # y = offset_y - (window_height + randint(0, window_height - 1))
-
-            # if y >= self.output_height:
-            #     break
 
     def entire_matching_refinement(self, iter=20, k=0.1, error_radius=2, save_img=False, show_seams=False):
         print('Refinement: Entire Patch matching')
@@ -883,9 +845,6 @@ class GraphCutTexture:
         window_height = self.input_height // 5
 
         offset_y = 0
-
-        # y is sample in (offset_y-overlap_height, offset_y]
-        # y = offset_y - (overlap_height + randint(0, overlap_height - 1))
 
         while offset_y < self.output_height:  # loop y
             print('New Row')
@@ -1038,19 +997,6 @@ class GraphCutTexture:
                 if err_sum > maxErr:
                     maxErr = err_sum
                     self.maxErrNodeNbGlobal = nodeNbGlobal
-
-                # nodeNbGlobal = self.get_node_number_global(0, 0, i, j)
-                # the_node = self.global_nodes[nodeNbGlobal]
-                # if not the_node.empty:
-                #     if the_node.seamRight:
-                #         if the_node.rightCost > maxErr:
-                #             maxErr = the_node.rightCost
-                #             self.maxErrNodeNbGlobal = nodeNbGlobal
-                #
-                #     if the_node.seamBottom:
-                #         if the_node.bottomCost > maxErr:
-                #             maxErr = the_node.bottomCost
-                #             self.maxErrNodeNbGlobal = nodeNbGlobal
 
         return maxErr
 
@@ -1238,15 +1184,14 @@ def test():
 
 
 if __name__ == "__main__":
-    data_filename = 'akeyboard_small.gif'
-    # data_filename = 'strawberries2.gif'
+    # data_filename = 'akeyboard_small.gif'
+    data_filename = 'strawberries2.gif'
     # data_filename = 'green.gif'
     # data_filename = 'jelly.gif'
     # data_filename = 'nuts6.gif'
     # data_filename = 'AB_valley.gif'
     # data_filename = 'AB_machu3.gif'
     # data_filename = 'sheep.gif'
-
 
     input_file_path = os.path.join('data', data_filename)
 
